@@ -400,9 +400,11 @@ def get_dataloaders(batch_size=64, img_size=308):
 
 ##### TRAINING
 # Training model function
-def train_model(model, criterion, optimizer, scheduler,
+def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader,
                 num_epochs=25, plot_confusion_matrix=True):
     """Run fixed-budget training and restore the best validation-macro-F1 model."""
+
+    dataloaders = {'train': train_loader, 'val': val_loader}
 
     if not isinstance(num_epochs, numbers.Integral) or num_epochs < 1:
         raise ValueError('num_epochs must be a positive integer.')

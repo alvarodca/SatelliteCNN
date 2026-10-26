@@ -34,9 +34,7 @@ CLASS_NAMES = ['Water', 'Very Low', 'Low', 'Moderate',
                'High', 'Very High', 'Non-burnable']
 NUM_CLASSES = len(CLASS_NAMES)
 MAX_TRAIN_SAMPLES = 0  # Set to 0 to use the full training split.
-NUM_WORKERS = 0
-CUSTOM_EPOCHS = 5
-FT_EPOCHS = 10
+NUM_WORKERS = 4 # For NVIDIA GPU
 CUSTOM_LR = 1e-2
 FT_LR = 1e-3
 
@@ -374,9 +372,29 @@ def get_dataloaders(batch_size=64, img_size=308):
     val_ds = FireRiskDataset(DB_DIR / 'val_reduced.csv', DB_DIR, transform=eval_transform)
     test_ds = FireRiskDataset(DB_DIR / 'test_reduced.csv', DB_DIR, transform=eval_transform)
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=128, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=128, shuffle=False)
+    train_loader = DataLoader(
+    train_ds,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=NUM_WORKERS,
+    pin_memory=True,           
+    persistent_workers=True     
+    )
+    val_loader = DataLoader(
+    val_ds,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=True,
+    persistent_workers=True
+    )
+    test_loader = DataLoader(
+    test_ds,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=True
+    )
     
     return train_loader, val_loader, test_loader, train_ds
 

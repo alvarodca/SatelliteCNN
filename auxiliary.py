@@ -492,3 +492,121 @@ def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader
         plt.show()
 
     return model
+
+# Implements the above function, including the ReduceLRONplateau and early stopping
+def train_model_es(model, criterion, optimizer, scheduler, train_loader, val_loader,
+                num_epochs=25, patience=5, plot_confusion_matrix=True):
+    """Run fixed-budget or early-stopped training and restore the best validation-macro-F1 model."""
+
+    dataloaders = {'train': train_loader, 'val': val_loader}
+
+    if not isinstance(num_epochs, numbers.Integral) or num_epochs < 1:
+        raise ValueError('num_epochs must be a positive integer.')
+    if not isinstance(criterion, nn.CrossEntropyLoss) or criterion.reduction != 'mean':
+        raise ValueError('Use CrossEntropyLoss with reduction="mean".')
+    if any(len(dataloaders[phase].dataset) == 0 for phase in ('train', 'val')):
+        raise ValueError('Training and validation datasets must be nonempty.')
+
+    seed_everything()
+
+    if dataloaders['train'].generator is not None:
+        dataloaders['train'].generator.manual_seed(SEED)
+
+    criterion = criterion.to(device)
+
+    since = time.time()
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_f1 = -float('inf')
+    best_predictions = best_labels = None
+    labels_order = np.arange(NUM_CLASSES)
+    
+    epochs_no_improve = 0
+
+    for epoch in range(num_epochs):
+        print(f'Epoch {epoch}/{num_epochs - 1}')
+        print('-' * 10)
+
+        val_loss_epoch = None
+        val_f1_epoch = None
+
+        for phase in ('train', 'val'):
+            model.train(phase == 'train')
+            running_loss = 0.0
+            loss_denominator = 0.0
+            phase_predictions, phase_labels = [], []
+
+            for sample in dataloaders[phase]:
+                inputs = sample['image'].to(device, dtype=torch.float32)
+                labels = sample['label'].to(device, dtype=torch.long)
+
+                if phase == 'train':
+                    optimizer.zero_grad(set_to_none=True)
+                with torch.set_grad_enabled(phase == 'train'):
+                    logits = model(inputs)
+                    if logits.shape != (labels.numel(), NUM_CLASSES):
+                        raise ValueError(f'The network must return N x {NUM_CLASSES} logits.')
+                    loss = criterion(logits, labels)
+                    if not torch.isfinite(loss):
+                        raise ValueError('Non-finite loss; check inputs and optimiser settings.')
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
+
+                denominator = (labels.numel() if criterion.weight is None else
+                               criterion.weight[labels].sum().item())
+                running_loss += loss.item() * denominator
+                loss_denominator += denominator
+                phase_predictions.append(logits.detach().argmax(dim=1).cpu().numpy())
+                phase_labels.append(labels.detach().cpu().numpy())
+
+            predictions = np.concatenate(phase_predictions)
+            true_labels = np.concatenate(phase_labels)
+            epoch_loss = running_loss / loss_denominator
+            epoch_f1 = f1_score(true_labels, predictions, labels=labels_order,
+                                average='macro', zero_division=0)
+            
+            print(f'{phase} Loss: {epoch_loss:.4f} Macro F1-score: {epoch_f1:.4f}')
+
+            if phase == 'val':
+                val_loss_epoch = epoch_loss
+                val_f1_epoch = epoch_f1
+
+                if epoch_f1 > best_f1:
+                    best_f1 = epoch_f1
+                    best_model_wts = copy.deepcopy(model.state_dict())
+                    best_predictions = predictions.copy()
+                    best_labels = true_labels.copy()
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+
+        # Step Learning Rate Scheduler
+        if scheduler is not None:
+            if isinstance(scheduler, lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss_epoch)
+            else:
+                scheduler.step()
+
+        print()
+
+        # Early Stopping Check
+        if epochs_no_improve >= patience:
+            print(f'Early stopping triggered after {patience} epochs without validation macro-F1 improvement.')
+            break
+
+    model.load_state_dict(best_model_wts)
+    model.eval()
+
+    elapsed = time.time() - since
+    print(f'Training complete in {int(elapsed // 60)}m {int(elapsed % 60)}s')
+    print(f'Best validation macro F1-score: {best_f1:.6f}')
+
+    if plot_confusion_matrix and best_labels is not None:
+        cm = confusion_matrix(best_labels, best_predictions, labels=labels_order, normalize='true')
+        display = ConfusionMatrixDisplay(100 * cm, display_labels=CLASS_NAMES)
+        display.plot(xticks_rotation='vertical', values_format='.1f')
+        plt.title('Row-normalised confusion matrix (%)')
+        plt.tight_layout()
+        plt.show()
+
+    return model

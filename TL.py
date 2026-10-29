@@ -54,7 +54,7 @@ trained_dino = train_model(
     scheduler=exp_lr_scheduler,
     train_loader=train_loader,  
     val_loader=val_loader,     
-    num_epochs=10,
+    num_epochs=30,
     plot_confusion_matrix=True
 )
 

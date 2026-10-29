@@ -6,3 +6,7 @@ db/
 __pycache__/
 
 *.log
+
+__MACOSX/
+
+*.env

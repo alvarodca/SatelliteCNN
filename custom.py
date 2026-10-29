@@ -3,8 +3,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from auxiliary import *
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

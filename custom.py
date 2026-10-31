@@ -9,102 +9,63 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 seed_everything()
 
-# Following block squeezes branches with a parallel expansions
-# This drastically lowers total parameter count and operations
-# Also allows for more activation and normalization layers without growing paramter counts  
-class SqueezeExpandBlock(nn.Module):
-    def __init__(self, in_channels, squeeze_channels, expand1x1_channels, expand3x3_channels):
+class ResBlock(nn.Module):
+    def __init__(self, cin, cout, stride=1):
         super().__init__()
-        self.squeeze_a = nn.Conv2d(in_channels, squeeze_channels, kernel_size=1)
-        self.expand_b = nn.Conv2d(squeeze_channels, expand1x1_channels, kernel_size=1) # 1x1 channels, pointwise information
-        self.expand_c = nn.Conv2d(squeeze_channels, expand3x3_channels, kernel_size=3, padding=1) # 3x3 channels
+        self.c1 = nn.Conv2d(cin, cout, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.b1 = nn.BatchNorm2d(cout)
+        self.c2 = nn.Conv2d(cout, cout, kernel_size=3, stride=1, padding=1, bias=False)
+        self.b2 = nn.BatchNorm2d(cout)
         
-        out_channels = expand1x1_channels + expand3x3_channels
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.ReLU(inplace=True)
+        self.skip = nn.Identity() if (cin == cout and stride == 1) else nn.Sequential(
+            nn.Conv2d(cin, cout, kernel_size=1, stride=stride, bias=False),
+            nn.BatchNorm2d(cout)
+        )
+        self.act = nn.SiLU(inplace=True)
 
     def forward(self, x):
-        x = self.squeeze_a(x)
-        out_b = self.expand_b(x)
-        out_c = self.expand_c(x)
-        out = torch.cat([out_b, out_c], dim=1)
-        out = self.bn(out)
-        return self.act(out)
+        y = self.act(self.b1(self.c1(x)))
+        y = self.b2(self.c2(y))
+        return self.act(y + self.skip(x))
 
 # CustomNet
 # Same as the one implemented in the notebook, should adjust later
 class CustomNet(nn.Module):
     """Implement a CNN mapping N x 3 x 224 x 224 to N x 7 logits."""
 
-    def __init__(self, num_classes = NUM_CLASSES):
+    def __init__(self, num_classes = NUM_CLASSES,widths=(32, 64, 128, 256)):
         super().__init__()
         # Initial convolution
-        self.conv1 = nn.Conv2d(3, 96, kernel_size=7, stride=2, padding=3) # 96 7x7 convolutional filters, this channels will be later reduced
-        self.bn1 = nn.BatchNorm2d(96)
-        self.relu1 = nn.ReLU(inplace=True)
-        self.pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, widths[0], kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(widths[0]),
+            nn.SiLU(inplace=True)
+        )
 
-        # Squeeze-expand block
-        self.fire2 = SqueezeExpandBlock(in_channels=96, squeeze_channels=16, expand1x1_channels=96, expand3x3_channels=32)
-        self.fire3 = SqueezeExpandBlock(in_channels=128, squeeze_channels=32, expand1x1_channels=128, expand3x3_channels=64)
-        self.pool2 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        #4 residual layers
+        layers = []
+        cin = widths[0]
+        for i, cout in enumerate(widths):
+            stride = 1 if i == 0 else 2
+            layers.append(ResBlock(cin, cout, stride=stride))
+            layers.append(ResBlock(cout, cout, stride=1))
+            cin = cout
 
-        self.fire4 =SqueezeExpandBlock(in_channels=192, squeeze_channels=48, expand1x1_channels=160, expand3x3_channels=96)
+        self.stages = nn.Sequential(*layers)
+        self.drop = nn.Dropout(0.3)
 
-        # Adaptive pooling for variable crop sizes, avoids overfitting, although there is a big collapse we might have to adjust
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1)) 
-
-        # Fully connected layers
-        self.fc1 = nn.Linear(256, 120)
-        self.dropout = nn.Dropout(p=0.3)
-        self.fc2 = nn.Linear(120, num_classes)
+        # Lienar PRojection
+        self.fc = nn.Linear(2 * widths[-1], num_classes)
 
     def forward(self, x):
-        # Connect the layers you define in __init__ using this reference graph.
-        x = self.pool1(self.relu1(self.bn1(self.conv1(x))))
-        x = self.fire2(x)
-        x = self.fire3(x)
-        x = self.pool2(x)
-        x = self.fire4(x)
-        
-        x = self.global_pool(x)
-        x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        return self.fc2(x)
+        x = self.stages(self.stem(x))
+        # Both average and max pooling
+        avg_pool = x.mean(dim=(2, 3))
+        max_pool = x.amax(dim=(2, 3))
+        pooled = torch.cat([avg_pool, max_pool], dim=1)
+        return self.fc(self.drop(pooled))
 
-# Loading data
-train_loader, val_loader, test_loader, train_dataset = get_dataloaders(batch_size=128, img_size=308)
-class_weights = compute_class_weights(train_dataset).to(device)
 
-# Initializing the model
-model_custom = CustomNet().to(device)
-
-criterion = nn.CrossEntropyLoss(weight=class_weights)
-optimizer_ft = optim.AdamW(
-    filter(lambda p: p.requires_grad, model_custom.parameters()), 
-    lr=FT_LR, 
-    weight_decay=1e-4
-)
-
-exp_lr_scheduler = lr_scheduler.ReduceLROnPlateau(
-    optimizer_ft, 
-    mode='min', 
-    factor=0.5, 
-    patience=4
-)
-
-trained_custom = train_model_es(
-    model=model_custom,
-    criterion=criterion,
-    optimizer=optimizer_ft,
-    scheduler=exp_lr_scheduler,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    num_epochs=100,
-    patience=8,
-    plot_confusion_matrix=True
-)
 
 
 # Generating the prediction
@@ -144,4 +105,31 @@ def generate_predictions(model, test_loader, output_path):
     
     return probabilities
 
-outputs_ft = generate_predictions(trained_custom, test_loader, OUTPUT_DIR / 'output_custom.csv')
+
+if __name__=="__main__":
+    seed_everything()
+
+    # Loading data
+    train_loader, val_loader, test_loader, train_dataset = get_dataloaders(batch_size=128, img_size=308)
+    class_weights = compute_softened_class_weights(train_dataset)
+
+    # Initializing the model
+    model_custom = CustomNet().to(device)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    optimizer_custom = optim.AdamW(model_custom.parameters(), lr=2e-3, weight_decay=1e-2)
+    scheduler_custom = lr_scheduler.CosineAnnealingLR(optimizer_custom, T_max=80, eta_min=1e-5)
+
+    trained_custom = train_model_es(
+    model=model_custom,
+    criterion=criterion,
+    optimizer=optimizer_custom,
+    scheduler=scheduler_custom,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    num_epochs=100,
+    patience=8,
+    plot_confusion_matrix=True
+    )
+
+    outputs_ft = generate_predictions(trained_custom, test_loader, OUTPUT_DIR / 'output_custom.csv')

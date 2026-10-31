@@ -23,8 +23,8 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils, models
-
 from sklearn.metrics import f1_score, confusion_matrix, ConfusionMatrixDisplay
+import torchvision.transforms.functional as TF
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -182,6 +182,32 @@ class Normalize:
         std = torch.as_tensor(self.std, dtype=image.dtype, device=image.device)[:, None, None]
         return {'image': (image - mean) / std, 'label': sample['label']}
 
+# Dihedral augmentation as satellite imagery is invariant to orientation
+class RandomDihedral:
+    def __call__(self, sample):
+        image = sample['image']
+
+        if isinstance(image, np.ndarray):
+            pil_img = Image.fromarray(util.img_as_ubyte(image))
+        else:
+            pil_img = image
+
+        # Orthogonal rotation
+        angle = random.choice([0, 90, 180, 270])
+        if angle > 0:
+            pil_img = TF.rotate(pil_img, angle)
+
+        # Horizontal flip
+        if random.random() < 0.5:
+            pil_img = TF.hflip(pil_img)
+
+        if isinstance(image, np.ndarray):
+            image = util.img_as_float32(np.asarray(pil_img))
+        else:
+            image = pil_img
+
+        return {'image': image, 'label': sample['label']}
+    
 # Adapts Pytorch's Center Crop to work on dictionary style dataset samples containing NP array images
 class TVCenterCrop:
     """Wrap torchvision CenterCrop for a NumPy image/sample dictionary."""
@@ -245,6 +271,21 @@ class TVColorJitter:
         image = util.img_as_float32(np.asarray(self.jitter(pil_img)))
         return {'image': image, 'label': sample['label']}
 
+class TVRandomResizedCrop:
+    """Randomly crops and resizes the image to a target output size."""
+    def __init__(self, size, scale=(0.7, 1.0), ratio=(0.9, 1.1)):
+        self.crop = transforms.RandomResizedCrop(
+            size=size,
+            scale=scale,
+            ratio=ratio
+        )
+
+    def __call__(self, sample):
+        image = sample['image']
+        pil_img = Image.fromarray(util.img_as_ubyte(image))
+        cropped = self.crop(pil_img)
+        image = util.img_as_float32(np.asarray(cropped))
+        return {'image': image, 'label': sample['label']}
 
 # Scikit-Image Transformations
 class SkResize:
@@ -351,13 +392,21 @@ def compute_class_weights(train_dataset):
     
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
-def get_dataloaders(batch_size=64, img_size=308):
-    """Images are 320x320, crops them into 308 and 308"""
+# Better results as above, above was giving much more gradient weights to water which showed to be less hard to distinguish thus affecting the model
+# This forces weights to average a value of 1 and reduces this penalty gap
+def compute_softened_class_weights(dataset, num_classes=NUM_CLASSES):
+    labels = dataset.dataset['label'].values
+    counts = torch.bincount(torch.tensor(labels, dtype=torch.long), minlength=num_classes).float()
+    freqs = counts / counts.sum()
+    raw_weights = (1.0 / freqs) ** 0.5
+    softened_weights = raw_weights / raw_weights.mean()
+    return softened_weights.to(device)
+
+def get_dataloaders(batch_size=32, img_size=320):
     train_transform = Compose([
-        RandomCrop(img_size),
-        TVRandomHorizontalFlip(p=0.5),
-        TVColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.02),
-        TVRandomRotation(degrees=180),
+        TVRandomResizedCrop(img_size, scale=(0.7, 1.0), ratio=(0.9, 1.1)),
+        RandomDihedral(), # All 8 valid orientations
+        TVColorJitter(brightness=0.15, contrast=0.15, saturation=0.1),
         ToTensor(),
         Normalize(PIXEL_MEAN, PIXEL_STD),
     ])
@@ -493,7 +542,7 @@ def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader
 
     return model
 
-# Implements the above function, including the ReduceLRONplateau and early stopping
+# Implements the above function, including the ReduceLRONplateau and early stopping 
 def train_model_es(model, criterion, optimizer, scheduler, train_loader, val_loader,
                 num_epochs=25, patience=5, plot_confusion_matrix=True):
     """Run fixed-budget or early-stopped training and restore the best validation-macro-F1 model."""

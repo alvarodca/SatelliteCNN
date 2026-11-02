@@ -30,6 +30,8 @@ class DINONet(nn.Module):
         features = self.backbone(x)
         logits = self.classifier(features)
         return logits
+
+        
 # Generating the prediction
 def generate_predictions(model, test_loader, output_path):
     """Computes softmax probabilities, validates shape and constraints, and saves a headerless CSV."""

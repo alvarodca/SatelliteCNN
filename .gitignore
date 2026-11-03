@@ -1,6 +1,6 @@
 db/
 
-*.zip
+#*.zip
 *.csv
 
 __pycache__/

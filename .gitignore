@@ -12,4 +12,5 @@ __MACOSX/
 *.env
 
 *.pth
-*.pth
+
+*.vscode
